@@ -1,0 +1,321 @@
+1. 安装一些R包：
+数据包： ALL, CLL, pasilla, airway
+软件包：limma，DESeq2，clusterProfiler
+工具包：reshape2
+绘图包：ggplot2
+不同领域的R包使用频率不一样，在生物信息学领域，尤其需要掌握bioconductor系列包。
+
+##if(F){
+  source("http://bioconductor.org/biocLite.R")
+  options("repos" = c(CRAN="https://mirrors.tuna.tsinghua.edu.cn/CRAN/"))
+  options(BioC_mirror="http://mirrors.ustc.edu.cn/bioc/")#修改镜像，安装会加速
+  BiocManager::install("clusterProfiler")
+  BiocManager::install("ComplexHeatmap")
+  BiocManager::install("maftools")
+  BiocManager::install("ggplot2")
+  BiocManager::install("jmzeng1314/biotrainee")
+}
+
+
+rm(list = ls())
+#加载GEOquery
+library(GEOquery)
+#下载数据集
+      eSet<-getGEO("GSE42872",destdir=".",AnnotGPL=F,getGPL=F)
+      str(eSet)
+      class(eSet)
+      
+#2.1得到表达矩阵   
+
+      #使用列表取子集的方法提取eSet列表里的第一个元素：eSet[[1]]
+      eSet[[1]]
+      
+      #并使用 as.matrix函数把它转化成矩阵
+      exp <- as.matrix(eSet[[1]])
+      exp[1:4,1:4]
+      class(exp)
+      
+      第二种方法
+      ##gSet<-read.table("GSE15366_series_matrix.txt.gz",comment.char = "!",header = T,sep = "\t")
+      #load(file = "GSE15366_series_matrix.txt")
+      # class(gSet)
+      # dim(gSet)
+      #str(gSet)
+     # 第一列设为行名
+     # rownames(gSet)=gSet[,1]
+     # 去掉第一列
+      #exp<-gSet[,-1]
+      
+      #从GEO下载（数据集）并写出我要的矩阵数据
+  downGSE("GPL6244")
+  downGSE<-function(studyID="GPL6244",destdir="."){
+  library(GEOquery)
+  eSet<-getGEO(studyID,destdir = destdir,getGPL =F)
+  exprSet=exprs(eSet[[1]])
+  pdata=pData(eSet[[1]])
+  write.csv(exprSet,paste0(studyID,"_exprSet.csv"))
+  write.csv(pdata,paste0(studyID,"_metadata.csv"))
+  return(eSet)}
+
+笨方法
+gpl<-getGEO("GPL6244",destdir=".")
+##gpl<-load(file = "GSE15366.soft")
+colnames(table(gpl))
+head(table(gpl)[,c(1,6,7)])
+write.csv(table(gpl)[,c(1,6,7)],"GPL6480.csv")
+
+
+#ID转换（GPL对应的Bioconductor注释包）
+#https://blog.csdn.net/weixin_40739969/article/details/103186027
+ID转换的第一步必须要加载特定的R包，下载哪个包，需要根据GPL来定
+查看当前GPL平台信息
+eSet[[1]]
+
+#安装并了解 hgu95av2.db 包,看看 ls("package:hgu95av2.db") 后 显示的那些变量
+#hgu95av2.db是一个注释包，它为hgu95av2平台的芯片提供注释，
+library(hugene10sttranscriptcluster.db)
+#这个包中有很多注释文件，如下所示： 
+ls("package:hugene10sttranscriptcluster.db")
+##我们可以看到这个包里面有很多数据集，
+#想要得到probe_id和symbol的对应关系要用hugene10sttranscriptclusterSYMBOL数据集
+#用toTable函数提取数据集里面的信息：
+
+ids=toTable(hugene10sttranscriptclusterSYMBOL)
+#现在我们查看下一共多少个基因？一万八千多个基因
+length(unique(ids$symbol))
+
+#再查看每个基因对应多少个探针：
+tail(sort(table(ids$symbol)))
+#可以看到有的基因设计了10个探针或8个探针....
+#table() 函数可以生成频数统计表，这里就是统计每个基因symbol出现的次数然后将其表格化；
+#sort()函数将symbol出现的频率从小到大进行排序；tail()取最后6个即出现频率最大的6个。
+table(sort(table(ids$symbol)))
+#table一下我们可以看到，18072个基因设计了1个探针；599个基因设计了2个探针；
+#132个基因设计了3个探针.....也就是说大部分的基因只设计了1个探针。
+#过滤表达矩阵，删除那1165个没有对应基因名字的探针。
+#方法1：%in% 逻辑判断
+plot(table(sort(table(ids$symbol))))
+##%in% 逻辑判断
+#用法 a %in% table
+#a值是否包含于table中，为真输出TURE，否者输出FALSE
+table(rownames(exp) %in% ids$ids$probe_id)
+#现在我们对探针进行过滤，把没有对应基因名的探针过滤掉：
+exp = exp[rownames(exp) %in% ids$probe_id,]
+dim(exp)
+#然后，我们使用match函数把ids里的探针顺序改一下，
+#使ids里探针顺序和我们表达矩阵的顺序完全一样：
+ids=ids[match(rownames(exp),ids$probe_id),]
+head(ids)
+exp[1:5,1:5]
+#既然已经完全对应上，我们就可以通过probe_id将表达矩阵exp进行分组
+#将同一个symbol所对应的多个探针分成不同的组，并对每组探针进行统计
+#计算每组中每行探针表达量的平均值（也就是每个探针在6个样本中表达量的均值rowMeans(x)）
+#再取平均值最大的那个探针作为该symbol所对应的唯一探针
+#该组中的其它探针过滤掉，这样每个symbol就对应一个探针了，看下代码是如何操作的：
+
+tmp = by(exp,
+         ids$symbol,
+         function(x) rownames(x)[which.max(rowMeans(x))])
+probes = as.character(tmp)
+dim(exp)
+exp = exp[rownames(exp) %in% probes,] # 过滤有多个探针的基因
+dim(exp)
+head(tmp)
+head(probes)
+#这时，探针ID和基因symbol就一一对应了
+#将表达矩阵探针ID即exp表达矩阵的行名（rownames(exp)）换为基因symbol：
+rownames(exp)=ids[match(rownames(exp),ids$probe_id),2]
+ head(exp)
+ 
+
+#reshape2包是一套重构和整合数据集的绝妙的万能工具。
+ #大致用法就是，需要首先将数据融合（melt），以使每一行都是唯一的标识符-变量组合。
+ #然后将数据重塑（cast）为你想要的任何形状。
+ #在重铸过程中，你可以使用任何函数对数据进行整合。
+#把数据变长
+ # 准备画图所需数据exp_L
+ library(reshape2)
+ head(exp)
+ exp_L = melt(exp)
+ head(exp_L)
+ colnames(exp_L)=c('symbol','sample','value')
+ head(exp_L)
+ 
+ # 1、获得分组信息
+ library(stringr)
+ group_list = ifelse(str_detect(pd$title,"Control")==TRUE,"contorl","treat")
+ group_list
+ exp_L$group = rep(group_list,each=nrow(exp))
+ head(exp_L)
+ #2、自己找一个分组数据
+ group_list=c(rep("control",times=3),rep("treat",times=3))
+ group_list
+ exp_L$group = rep(group_list,each=nrow(exp))
+ head(exp_L)
+ # ggplot2画图 
+ library(ggplot2)
+ p = ggplot(exp_L,
+            aes(x=sample,y=value,fill=group))+geom_boxplot()
+ print(p)
+ #我们先理解一下 exp_L 数据
+ head(exp_L)
+ table(exp_L[,2])
+ dim(exp_L)
+ ##boxplot图精修版
+ p=ggplot(exp_L,aes(x=sample,y=value,fill=group))+geom_boxplot()
+ p=p+stat_summary(fun.y="mean",geom="point",shape=23,size=3,fill="red")
+ p=p+theme_set(theme_set(theme_bw(base_size=20)))
+ p=p+theme(text=element_text(face='bold'),axis.text.x=element_text(angle=30,hjust=1),axis.title=element_blank())
+ print(p)
+ #3.3 检查样本分组信息
+ #检查样本分组信息，一般看PCA图，hclust图
+ # 更改表达矩阵列名 1:6表示有6个样本如果20那就1:20
+ head(exp)
+ colnames(exp) = paste(group_list,1:6,sep='')
+ head(exp)
+ # 定义nodePar
+ nodePar <- list(lab.cex = 0.6, pch = c(NA, 19), 
+                 cex = 0.7, col = "blue")
+ # 聚类
+ hc=hclust(dist(t(exp)))
+ par(mar=c(5,5,5,10)) 
+ # 绘图
+ plot(as.dendrogram(hc), nodePar = nodePar,  horiz = TRUE)
+ 
+ #画出图后我们发现，control和treatment很好的分开了
+ #组内也很好的聚类到了一起说明数据过关。
+ 
+ #PCA分析
+ library(ggfortify)
+ # 互换行和列，再dim一下
+ df=as.data.frame(t(exp))
+ # 不要view df，列太多，软件会卡住；
+ dim(df)
+ dim(exp)
+ 
+ exp[1:6,1:6]
+ df[1:6,1:6]
+ 
+ df$group=group_list 
+ autoplot(prcomp( df[,1:(ncol(df)-1)] ), data=df,colour = 'group')
+ save(exp,group_list,file = "step2output.Rdata")
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+     
+         
+         
+         
